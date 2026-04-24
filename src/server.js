@@ -1,5 +1,6 @@
 require('dotenv').config();
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const express = require('express');
 const path = require('path');
 const multer = require('multer');
@@ -13,6 +14,24 @@ const surveyService = require('./services/survey');
 const PDFDocument = require('pdfkit');
 
 const app = express();
+const helmet = require('helmet');
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https://res.cloudinary.com"],
+      connectSrc: ["'self'", "https://res.cloudinary.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      objectSrc: ["'self'"],
+      mediaSrc: ["'self'", "https://res.cloudinary.com"],
+      frameSrc: ["'self'"]
+    }
+  }
+}));
+
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || ('http://localhost:' + PORT)).replace(/\/$/, '');
 const FRONTEND_DIST = path.join(__dirname, '../public/app');
@@ -33,6 +52,8 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(FRONTEND_DIST));
 app.use(express.static(path.join(__dirname, '../public')));
+
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 app.get('/survey', function(req, res) {
   // Check if token already provided in query
@@ -94,11 +115,11 @@ async function loadSessions() {
 }
 
 function hashPassword(password) {
-  return crypto.createHash('sha256').update(password).digest('hex');
+  return bcrypt.hashSync(password, 12);
 }
 
 function verifyPassword(password, hash) {
-  return hashPassword(password) === hash;
+  return bcrypt.compareSync(password, hash);
 }
 
 function generateSessionToken() {
@@ -175,8 +196,6 @@ app.post('/api/upload/image', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'image_data_required' });
     }
 
-    console.log('Uploading image to Cloudinary...');
-
     const cloudinary = require('./cloudinary');
     const result = await cloudinary.uploader.upload(req.body.image_data, {
       upload_preset: process.env.CLOUDINARY_UPLOAD_PRESET,
@@ -186,11 +205,8 @@ app.post('/api/upload/image', requireAuth, async (req, res) => {
       ]
     });
 
-    console.log('Cloudinary upload successful:', result.secure_url);
-
     res.json({ url: result.secure_url });
   } catch (e) {
-    console.error('Upload error:', e.message);
     res.status(500).json({ error: 'upload_failed', details: e.message });
   }
 });
@@ -217,7 +233,7 @@ app.post('/api/upload/image-base64', requireAuth, async (req, res) => {
 });
 
 function requireAdmin(req, res, next) {
-  const allowInsecure = String(process.env.ALLOW_INSECURE_ADMIN || 'true').toLowerCase() === 'true';
+  const allowInsecure = String(process.env.ALLOW_INSECURE_ADMIN || 'false').toLowerCase() === 'true';
   if (allowInsecure) return next();
 
   const expected = process.env.ADMIN_API_KEY;
@@ -466,18 +482,21 @@ async function fetchQuestions(args) {
   const categoryFilter = args && args.category;
   
   let whereClause = 'is_deleted = FALSE';
+  let params = [];
   if (!includeInactive) {
     whereClause += ' AND is_active = TRUE';
   }
   if (categoryFilter) {
-    whereClause += ` AND category = '${categoryFilter}'`;
+    whereClause += ' AND category = $1';
+    params.push(categoryFilter);
   }
   
   const rows = await db.query(
     `SELECT id, question_key, label, type, required, options, min_value, max_value, order_no, is_active, page_number, category
      FROM survey_questions
      WHERE ${whereClause}
-     ORDER BY page_number ASC, order_no ASC, id ASC`
+     ORDER BY page_number ASC, order_no ASC, id ASC`,
+    params
   );
 
   return rows.rows.map((r) => {
@@ -975,8 +994,8 @@ app.get('/api/responses', requireAuth, async function (req, res) {
   const doctorId = String(req.query.doctor_id || '').trim();
   const dateFrom = String(req.query.date_from || '').trim();
   const dateTo = String(req.query.date_to || '').trim();
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+  const page = Math.max(1, Number.isInteger(parseInt(req.query.page)) ? parseInt(req.query.page) : 1);
+  const limit = Math.min(100, Math.max(1, Number.isInteger(parseInt(req.query.limit)) ? parseInt(req.query.limit) : 20));
 
   const conditions = [];
   const params = [];
@@ -1028,12 +1047,12 @@ app.get('/api/responses', requireAuth, async function (req, res) {
   const offset = (page - 1) * limit;
 
   let sql = `SELECT fs.id AS submission_id, fs.submitted_at, fs.token, fs.patient_name,
-             fs.selected_doctor_names, fs.question_answers
+             fs.selected_doctor_ids, fs.selected_doctor_names, fs.question_answers
              FROM feedback_submissions fs
              ${whereClause}
              ORDER BY fs.submitted_at DESC, fs.id DESC
-             LIMIT ${limit} OFFSET ${offset}`;
-  const rows = await db.query(sql, params);
+             LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
+  const rows = await db.query(sql, [...params, limit, offset]);
 
   const responses = rows.rows.map((row) => ({
     submission_id: row.submission_id,
@@ -1041,6 +1060,7 @@ app.get('/api/responses', requireAuth, async function (req, res) {
     token: row.token,
     patient_name: row.patient_name,
     doctor_names: row.selected_doctor_names ? row.selected_doctor_names.join(', ') : '',
+    selected_doctor_ids: row.selected_doctor_ids || [],
     question_answers: row.question_answers || {}
   }));
 
@@ -2749,11 +2769,22 @@ app.post('/api/auth/register', async function (req, res) {
       return res.status(400).json({ error: 'password_min_6_chars' });
     }
     
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      return res.status(400).json({ error: 'invalid_email_format' });
+    }
+    
+    const usernameClean = username.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+    
     const passwordHash = hashPassword(password);
+    
+    if (!usernameClean || usernameClean.length < 3) {
+      return res.status(400).json({ error: 'username_min_3_chars' });
+    }
     
     const result = await db.query(
       'INSERT INTO admin_users(username, email, password_hash) VALUES($1, $2, $3) RETURNING id, username, email',
-      [username.trim(), email.trim().toLowerCase(), passwordHash]
+      [usernameClean, email.trim().toLowerCase(), passwordHash]
     );
     
     return res.json({ user: result.rows[0] });

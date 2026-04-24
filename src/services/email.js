@@ -54,14 +54,9 @@ async function sendEmail({ to, subject, html, pdfBuffer, pdfFilename }) {
       ];
     }
     
-    console.log('Attempting to send email to:', to);
-    console.log('SMTP Config:', { host: process.env.SMTP_HOST, port: process.env.SMTP_PORT, user: process.env.SMTP_USER });
-    
     const info = await transport.sendMail(mailOptions);
-    console.log('Email sent successfully:', info.messageId);
     return { ok: true, messageId: info.messageId };
   } catch (e) {
-    console.error('Email failed with error:', e.code, e.message);
     if (e.code === 'EAUTH') {
       return { ok: false, error: 'SMTP authentication failed. Please check your email credentials.' };
     }

@@ -3281,10 +3281,13 @@ function AdminDashboard({ authToken, currentUser, onLogout }) {
                               const optionsEn = Array.isArray(optionsObj) ? optionsObj : (optionsObj.en || []);
                               const optionsAm = optionsObj.am || [];
                               const matchKey = q.key || String(q.id);
-                              for (const key of Object.keys(qa)) {
-                                if (key.endsWith('_' + matchKey)) {
-                                  const rawAnswer = qa[key];
-                                  let displayAnswer = rawAnswer;
+                              const doctorIds = r.selected_doctor_ids || [];
+                              for (let i = 0; i < doctorIds.length; i++) {
+                                const doctorId = doctorIds[i];
+                                const answerKey = 'doctor_' + doctorId + '_' + matchKey;
+                                const rawAnswer = qa[answerKey];
+                                let displayAnswer = rawAnswer;
+                                if (rawAnswer !== undefined) {
                                   if (q.type === 'text') {
                                     displayAnswer = rawAnswer;
                                   } else if (Array.isArray(rawAnswer)) {
